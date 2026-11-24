@@ -1,0 +1,30 @@
+# campus-auth 配置示例
+# 部署后把本文件复制到 /sdcard/Homedroid/campus-auth.conf 并填入真实信息
+# 程序会依次查找：$CAMPUS_CONFIG → /sdcard/Homedroid/campus-auth.conf
+#                → /media/campus-auth.conf → /mnt/homedroid/campus-auth.conf
+
+# 认证接口（从浏览器 F12 抓包 Copy as cURL 里取）
+AUTH_URL="http://10.10.10.10/eportal/InterFace.do?method=login"
+
+# 请求方式：POST 或 GET
+AUTH_METHOD="POST"
+
+# 账号密码字段名（各校不同，常见：username/password、userId/password、DDXN/password）
+USER_FIELD="username"
+PASS_FIELD="password"
+CAMPUS_USER="你的学号"
+CAMPUS_PASS="你的密码"
+
+# 额外表单字段，JSON 格式（可选）
+# EXTRA_PARAMS={"service":"default","wlan_user_ip":"10.12.34.56"}
+
+# 可选：认证前先访问的页面（有些门户需要先拿 cookie/参数）
+# PREFLIGHT_URL="http://10.10.10.10/eportal/index.jsp"
+
+# 联网探测地址，204 视为在线
+CHECK_URL="http://connect.rom.miui.com/generate_204"
+
+# 时间参数（秒）
+CHECK_INTERVAL="30"
+RETRY_INTERVAL="15"
+MAX_BACKOFF="300"
