@@ -2,11 +2,14 @@
 """campus-auth 校园网掉线自动重认证
 
 常驻循环：探测 -> 掉线则发认证请求 -> 指数退避重试
-配置从配置文件中读取（见 CONFIG_PATHS），日志同时输出到 stdout 和文件。
+配置来源：环境变量优先，其次配置文件。日志输出到 stdout 和文件。
+同时在 PORT（默认 3000）提供一个只读状态接口，供面板检查健康状态。
 """
 import json
 import os
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
@@ -27,6 +30,21 @@ LOG_PATHS = [
     os.path.join(HERE, "campus-auth.log"),
 ]
 
+ENV_KEYS = [
+    "AUTH_URL", "AUTH_METHOD", "USER_FIELD", "PASS_FIELD", "CAMPUS_USER",
+    "CAMPUS_PASS", "EXTRA_PARAMS", "PREFLIGHT_URL", "CHECK_URL",
+    "CHECK_INTERVAL", "RETRY_INTERVAL", "MAX_BACKOFF", "USER_AGENT", "PORT",
+]
+
+STATE = {
+    "status": "starting",
+    "checks": 0,
+    "auths": 0,
+    "last_check": 0,
+    "last_auth": 0,
+    "config_from": "",
+}
+
 
 def log(msg):
     line = time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg)
@@ -41,9 +59,10 @@ def log(msg):
 
 
 def load_config():
+    cfg = {}
+    source = "none"
     for path in CONFIG_PATHS:
         if path and os.path.isfile(path):
-            cfg = {}
             with open(path, encoding="utf-8") as f:
                 for raw in f:
                     line = raw.strip()
@@ -51,10 +70,21 @@ def load_config():
                         continue
                     key, value = line.split("=", 1)
                     cfg[key.strip()] = value.strip().strip('"').strip("'")
-            log("config loaded from " + path)
-            return cfg
-    log("no config found, looked at: " + ", ".join(p for p in CONFIG_PATHS if p))
-    return {}
+            source = path
+            break
+
+    for key in ENV_KEYS:
+        if os.environ.get(key):
+            cfg[key] = os.environ[key]
+            if source == "none":
+                source = "environment"
+            elif not source.startswith("environment"):
+                source += " + environment"
+
+    STATE["config_from"] = source
+    log("config loaded from " + source if source != "none" else
+        "no config found, looked at: " + ", ".join(p for p in CONFIG_PATHS if p))
+    return cfg
 
 
 def probe(session, url, timeout=6):
@@ -95,20 +125,54 @@ def authenticate(session, cfg):
         log("auth failed: " + type(e).__name__)
 
 
+class StatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        STATE["uptime"] = int(time.time() - STARTED_AT)
+        body = json.dumps(STATE, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def start_status_server(port):
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), StatusHandler)
+    except OSError as e:
+        log("status server failed on :%s (%s)" % (port, e))
+        return
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log("status server listening on :%s" % port)
+
+
+STARTED_AT = time.time()
+
+
 def main():
     cfg = load_config()
     check_url = cfg.get("CHECK_URL", DEFAULT_CHECK)
     interval = int(cfg.get("CHECK_INTERVAL", "30"))
     retry = int(cfg.get("RETRY_INTERVAL", "15"))
     max_backoff = int(cfg.get("MAX_BACKOFF", "300"))
+    port = int(cfg.get("PORT", "3000"))
 
+    start_status_server(port)
     log("started pid=%s check=%s" % (os.getpid(), check_url))
+
     session = requests.Session()
     session.headers.update({"User-Agent": cfg.get("USER_AGENT", "Mozilla/5.0 (Linux; Android 12)")})
 
     backoff = retry
     while True:
         state = probe(session, check_url)
+        STATE["checks"] += 1
+        STATE["last_check"] = int(time.time())
+        STATE["status"] = state
+
         if state == "online":
             backoff = retry
             time.sleep(interval)
@@ -118,13 +182,17 @@ def main():
             log("network unreachable (%s), retry in %ss" % (state, backoff))
         else:
             log("portal detected, authenticating")
+            STATE["auths"] += 1
+            STATE["last_auth"] = int(time.time())
             authenticate(session, cfg)
             time.sleep(5)
             if probe(session, check_url) == "online":
                 log("back online")
+                STATE["status"] = "online"
                 backoff = retry
                 continue
             log("auth did not take effect")
+            STATE["status"] = "auth-failed"
 
         time.sleep(backoff)
         backoff = min(backoff * 2, max_backoff)
